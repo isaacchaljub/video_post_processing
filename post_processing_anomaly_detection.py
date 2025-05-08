@@ -16,116 +16,145 @@ import numpy as np
 data=pd.read_csv('A04 FILA 01B_output_stem_trackable_objects.csv')
 config=pd.read_csv('A04 FILA 01B_output_config.csv')
 
-#Get the velocity for each object and observation
-def compute_vel(group):
-    # Compute velocity as the difference in centroids_x over difference in frames
-    vel = group['centroids_x'].diff() / group['frames'].diff()
-    # Replace the first observation (NaN) with the group's mean velocity
-    if not vel.empty:
-        vel.iloc[0] = vel.mean()  # .mean() ignores NaN by default
-    return vel
 
-def assign_velocities(df):
-    # Use groupby to apply compute_vel for each object_id
-    df['velocity'] = df.groupby('object_id', group_keys=False)[['centroids_x','frames']].apply(compute_vel)
-    return df
+class FalsePositiveFilter():
+    def __init__(self):
+        pass
+     
+    #Get the velocity for each object and observation
+    def compute_vel(self, group):
+        # Compute velocity as the difference in centroids_x over difference in frames
+        vel = group['centroids_x'].diff() / group['frames'].diff()
+        # Replace the first observation (NaN) with the group's mean velocity
+        if not vel.empty:
+            vel.iloc[0] = vel.mean()  # .mean() ignores NaN by default
+        return vel
 
-#Get the velocity for each object and observation
-assign_velocities(data)
+    def assign_velocities(self, df):
+        # Use groupby to apply compute_vel for each object_id
+        df['velocity'] = df.groupby('object_id', group_keys=False)[['centroids_x','frames']].apply(self.compute_vel)
+        return df
 
-#Correct in case the video goes from left to right
-if data['velocity'].mean()<0:
-        data['velocity']=-data['velocity']
+    def post_process(self, stem_data_path:str, config_path_str, model_path:str):
+        '''
+        Post-process to filter out false positives in output_stem and correct output_config file.
 
-#Get the frames persisted and the first frame for each object
-frame_counts = data.groupby('object_id')['frames'].apply(lambda x: x.max() - x.min())
-frame_info=data.groupby('object_id')['frames'].min()
+        Parameters
+        ----------
 
-#Assign the values to the data frame
-data['frames']=[frame_counts.get(data.loc[i,'object_id']) for i in range(len(data))]
-data['first_frame']=[frame_info.get(data.loc[i,'object_id']) for i in range(len(data))]
+        stem_data_path : str
+            Path to the output_stem CSV file.
+        config_path_str : str
+            Path to the output_config CSV file.
+        model_path : str
+            Path to the trained model file.
 
-#Get mean velocity and std area for each object, and adjust std area by frames
-data['mean_velocity_fps']=[data.groupby('object_id')['velocity'].mean().get(data.loc[i,'object_id']) for i in range(len(data))]
-data['std_area']=[data.groupby('object_id')['area'].std().get(data.loc[i,'object_id']) for i in range(len(data))]
-data['adj_std_area']=data['std_area']/data['frames']
+        Returns
+        -------
 
-#Work only with stems that were counted in the original detection
-positive_stems=data[data['counted']==1].reset_index(drop=True)
-positive_stems.drop(columns=['counted'], inplace=True)
+        An excel file with the filtered config data.
+        '''
+        #Read the CSV files
+        data=pd.read_csv(stem_data_path)
+        config=pd.read_csv(config_path_str)
 
-#Check if there are the same number of stems in data and config, if not, reassign the stem with the lowest count to the next one in config
-while len(positive_stems.groupby('object_id').count()) < len(config.groupby('stem').count()):
-    config['stem']=[config['stem'][i]+1 if config['stem'][i]==config.groupby('stem').size().idxmin() else config['stem'][i] for i in range(len(config))]
-    #Adjust the stem number to the new amount using factorization
-    config['stem']=pd.factorize(config['stem'])[0]+1
 
-#Get the first frame for each object in positive_stems, then the distance between the first frame of each object and the first frame of the previous object
-ffp=pd.DataFrame(positive_stems.groupby('object_id')['first_frame'].mean())
-ffp['dist']=[ffp.iloc[i,0] if i==0 else ffp.iloc[i,0]-ffp.iloc[i-1,0] for i in range(len(ffp))]
-positive_stems['dist_between_apps']=[ffp['dist'].get(positive_stems.loc[i,'object_id']) for i in range(len(positive_stems))]
+        #Get the velocity for each object and observation
+        self.assign_velocities(data)
 
-#Drop the first frame column, as it is not needed anymore
-positive_stems.drop('first_frame',axis=1,inplace=True)
+        #Correct in case the video goes from left to right
+        if data['velocity'].mean()<0:
+                data['velocity']=-data['velocity']
 
-#Get the adjusted frames as the frames tracked times the normalized speed
-normalized_speed=MinMaxScaler().fit_transform(pd.DataFrame(positive_stems['mean_velocity_fps']))
-positive_stems['adjusted_frames']=[positive_stems['frames'][i]*normalized_speed[i][0] for i in range(len(normalized_speed))]
+        #Get the frames persisted and the first frame for each object
+        frame_counts = data.groupby('object_id')['frames'].apply(lambda x: x.max() - x.min())
+        frame_info=data.groupby('object_id')['frames'].min()
 
-#Use robust scaler for data to be able to use the model trained with the same scaler
-scaled_data=RobustScaler().fit_transform(positive_stems.drop(['object_id'],axis=1))
+        #Assign the values to the data frame
+        data['frames']=[frame_counts.get(data.loc[i,'object_id']) for i in range(len(data))]
+        data['first_frame']=[frame_info.get(data.loc[i,'object_id']) for i in range(len(data))]
 
-#Get the columns that were scaled
-scaled_cols=positive_stems.drop(['object_id'],axis=1).columns
+        #Get mean velocity and std area for each object, and adjust std area by frames
+        data['mean_velocity_fps']=[data.groupby('object_id')['velocity'].mean().get(data.loc[i,'object_id']) for i in range(len(data))]
+        data['std_area']=[data.groupby('object_id')['area'].std().get(data.loc[i,'object_id']) for i in range(len(data))]
+        data['adj_std_area']=data['std_area']/data['frames']
 
-#Get the scaled data for the positive stems
-scaled_positive_stems=positive_stems.copy()
-scaled_positive_stems.set_index('object_id', inplace=True)
-scaled_positive_stems[scaled_cols]=scaled_data
+        #Work only with stems that were counted in the original detection
+        positive_stems=data[data['counted']==1].reset_index(drop=True)
+        positive_stems.drop(columns=['counted'], inplace=True)
 
-#Import the model and predict the anomalies
-model=joblib.load('random_forest_model.pkl')
-predictions=model.predict(scaled_positive_stems)
+        #Check if there are the same number of stems in data and config, if not, reassign the stem with the lowest count to the next one in config
+        while len(positive_stems.groupby('object_id').count()) < len(config.groupby('stem').count()):
+            config['stem']=[config['stem'][i]+1 if config['stem'][i]==config.groupby('stem').size().idxmin() else config['stem'][i] for i in range(len(config))]
+            #Adjust the stem number to the new amount using factorization
+            config['stem']=pd.factorize(config['stem'])[0]+1
 
-#Add the predictions to the positive stems data frame
-scaled_positive_stems['predictions']=predictions
+        #Get the first frame for each object in positive_stems, then the distance between the first frame of each object and the first frame of the previous object
+        ffp=pd.DataFrame(positive_stems.groupby('object_id')['first_frame'].mean())
+        ffp['dist']=[ffp.iloc[i,0] if i==0 else ffp.iloc[i,0]-ffp.iloc[i-1,0] for i in range(len(ffp))]
+        positive_stems['dist_between_apps']=[ffp['dist'].get(positive_stems.loc[i,'object_id']) for i in range(len(positive_stems))]
 
-#Get the average predictions for each stem, to be able to classify the stem as an anomaly or not
-positive_stems['predictions']=[1 if scaled_positive_stems.groupby('object_id')['predictions'].mean().get(positive_stems.loc[i,'object_id'])>0.5 else 0 for i in range(len(positive_stems))]
+        #Drop the first frame column, as it is not needed anymore
+        positive_stems.drop('first_frame',axis=1,inplace=True)
 
-#Use factorization to get the stem number for each object
-positive_stems['stem']=pd.factorize(positive_stems['object_id'])[0] + 1
+        #Get the adjusted frames as the frames tracked times the normalized speed
+        normalized_speed=MinMaxScaler().fit_transform(pd.DataFrame(positive_stems['mean_velocity_fps']))
+        positive_stems['adjusted_frames']=[positive_stems['frames'][i]*normalized_speed[i][0] for i in range(len(normalized_speed))]
 
-#Create a dictionary with the stem number and the predictions
-predictions_dict = {positive_stems['stem'][i]: positive_stems['predictions'][i] for i in range(len(positive_stems))}
+        #Use robust scaler for data to be able to use the model trained with the same scaler
+        scaled_data=RobustScaler().fit_transform(positive_stems.drop(['object_id'],axis=1))
 
-#Add the predictions to the config data frame
-config['pred']=[predictions_dict.get(stem) for stem in config['stem']]
+        #Get the columns that were scaled
+        scaled_cols=positive_stems.drop(['object_id'],axis=1).columns
 
-#Now, assign the values of stems that are negative to the next stem number unless it's the last one, in which case assign it to the previous one
-for i in range(len(config)):
-    if config['pred'][i]==0:
-        if config['stem'][i]!=config['stem'].max():
-            config.at[i,'stem']=config['stem'][i]+1
-        else:
-            config.at[i,'stem']=config['stem'].max()-1
+        #Get the scaled data for the positive stems
+        scaled_positive_stems=positive_stems.copy()
+        scaled_positive_stems.set_index('object_id', inplace=True)
+        scaled_positive_stems[scaled_cols]=scaled_data
 
-#Drop the pred column from the config data frame
-config.drop('pred',axis=1,inplace=True)
+        #Import the model and predict the anomalies
+        model=joblib.load(model_path)
+        predictions=model.predict(scaled_positive_stems)
 
-#Factorize config one last time to get the stem number for each object
-config['stem']=pd.factorize(config['stem'])[0] + 1
+        #Add the predictions to the positive stems data frame
+        scaled_positive_stems['predictions']=predictions
 
-#Fix the product mismatch that occurs when reassigning the stem number
-#1) get the unique product values for each stem
-tmp = config[['stem', 'product']].drop_duplicates()
-# 2) sum the unique product values that now belong to the same stem
-stem_product_sum = tmp.groupby('stem')['product'].sum()
-# 3) give every row in that stem the same summed value
-config['product'] = config['stem'].map(stem_product_sum)
+        #Get the average predictions for each stem, to be able to classify the stem as an anomaly or not
+        positive_stems['predictions']=[1 if scaled_positive_stems.groupby('object_id')['predictions'].mean().get(positive_stems.loc[i,'object_id'])>0.5 else 0 for i in range(len(positive_stems))]
 
-#Save the config file to a new CSV file
-# new_file_name=os.path.splitext(file2)[0] + '_filtered.csv'
-new_file_name='A04 FILA 01B_output_config_filtered.csv'
-config.to_csv(new_file_name, index=False)
-print(f"Filtered config file saved as {new_file_name}")
+        #Use factorization to get the stem number for each object
+        positive_stems['stem']=pd.factorize(positive_stems['object_id'])[0] + 1
+
+        #Create a dictionary with the stem number and the predictions
+        predictions_dict = {positive_stems['stem'][i]: positive_stems['predictions'][i] for i in range(len(positive_stems))}
+
+        #Add the predictions to the config data frame
+        config['pred']=[predictions_dict.get(stem) for stem in config['stem']]
+
+        #Now, assign the values of stems that are negative to the next stem number unless it's the last one, in which case assign it to the previous one
+        for i in range(len(config)):
+            if config['pred'][i]==0:
+                if config['stem'][i]!=config['stem'].max():
+                    config.at[i,'stem']=config['stem'][i]+1
+                else:
+                    config.at[i,'stem']=config['stem'].max()-1
+
+        #Drop the pred column from the config data frame
+        config.drop('pred',axis=1,inplace=True)
+
+        #Factorize config one last time to get the stem number for each object
+        config['stem']=pd.factorize(config['stem'])[0] + 1
+
+        #Fix the product mismatch that occurs when reassigning the stem number
+        #1) get the unique product values for each stem
+        tmp = config[['stem', 'product']].drop_duplicates()
+        # 2) sum the unique product values that now belong to the same stem
+        stem_product_sum = tmp.groupby('stem')['product'].sum()
+        # 3) give every row in that stem the same summed value
+        config['product'] = config['stem'].map(stem_product_sum)
+
+        #Save the config file to a new CSV file
+        # new_file_name=os.path.splitext(file2)[0] + '_filtered.csv'
+        new_file_name=str.split(config_path_str,sep='.')[0]+'_filtered.csv'
+        config.to_csv(new_file_name, index=False)
+        print(f"Filtered config file saved as {new_file_name}")
